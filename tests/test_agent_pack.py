@@ -967,7 +967,7 @@ def _run_init_via_cli(
                     tracker.start(key)
                     tracker.complete(key, "mocked")
                 except Exception:
-                    pass
+                    pass  # Tracker key may not exist — safe to ignore in mock
 
     flag = "--agent" if use_agent_flag else "--ai"
     args = [
@@ -983,7 +983,7 @@ def _run_init_via_cli(
         if agent in AGENT_SKILLS_MIGRATIONS:
             args.append("--ai-skills")
     except (ImportError, AttributeError):
-        pass
+        pass  # AGENT_SKILLS_MIGRATIONS may not exist — proceed without --ai-skills
 
     with _patch(
         "specify_cli.download_and_extract_template", _mock_download,
@@ -1151,7 +1151,7 @@ class TestInitFlowParity:
                     f"(skills migration removes commands)")
                 return
         except (ImportError, AttributeError):
-            pass
+            pass  # AGENT_SKILLS_MIGRATIONS unavailable — fall through to failure
 
         pytest.fail(
             f"Agent '{agent}': commands_dir "

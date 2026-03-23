@@ -336,7 +336,7 @@ class AgentBootstrap:
                 p.resolve().relative_to(agent_root_resolved)
                 all_agent.append(p)
             except ValueError:
-                pass
+                pass  # Path is outside the agent root — skip it
 
         # Scan the agent's directory tree for files created by later
         # init pipeline steps (skills, presets, extensions) that
@@ -665,7 +665,7 @@ def resolve_agent_pack(
                         emb = AgentManifest.from_yaml(emb_file)
                         overrides = f"embedded v{emb.version}"
                     except AgentPackError:
-                        pass
+                        pass  # Embedded manifest unreadable — skip override info
 
             return ResolvedPack(
                 manifest=manifest,
