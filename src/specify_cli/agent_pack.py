@@ -695,12 +695,17 @@ def remove_tracked_files(
             abs_path.unlink()
             removed.append(rel_path)
 
-    # Clean up the install manifest only when all tracked files were
-    # removed.  If some were skipped (modified), keep the manifest so
-    # those files remain tracked for future teardown attempts.
+    # Clean up the install manifest only when no tracked files remain
+    # on disk.  Files already deleted by the user count as gone, not
+    # as "remaining" — only files that still exist and were skipped
+    # (e.g. modified without --force) prevent manifest cleanup.
     if manifest_file.is_file():
-        remaining = len(entries) - len(removed)
-        if remaining == 0:
+        still_on_disk = sum(
+            1 for rel_path in entries
+            if (project_path / rel_path).is_file()
+            and rel_path not in removed
+        )
+        if still_on_disk == 0:
             manifest_file.unlink(missing_ok=True)
     return removed
 

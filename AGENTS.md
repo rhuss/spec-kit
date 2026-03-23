@@ -453,8 +453,10 @@ specify init --here --agent gemini --ai-skills  # With skills
 | `specify agent search [query]`  | Search agents by name, ID, description, or tags |
 | `specify agent validate <path>` | Validate an agent pack directory |
 | `specify agent export <id>`     | Export an agent pack for editing |
-| `specify agent add <id>`        | Install an agent pack from a local path |
+| `specify agent add <id> --from <path>` | Install an agent pack from a local directory |
 | `specify agent remove <id>`     | Remove a cached/override agent pack |
+
+> **Note:** `specify agent add <id>` without `--from <path>` is reserved for future catalog-based installation, which is not yet implemented.
 
 ### Pack resolution order
 

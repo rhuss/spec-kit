@@ -1877,7 +1877,7 @@ def init(
     if use_agent_pack:
         from .agent_pack import resolve_agent_pack, load_bootstrap, PackResolutionError, AgentPackError
         try:
-            resolved = resolve_agent_pack(selected_ai)
+            resolved = resolve_agent_pack(selected_ai, project_path=project_path)
             agent_bootstrap = load_bootstrap(resolved.path, resolved.manifest)
             console.print(f"[dim]Pack-based flow: {resolved.manifest.name} ({resolved.source})[/dim]")
         except (PackResolutionError, AgentPackError) as exc:
