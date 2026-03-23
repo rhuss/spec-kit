@@ -383,6 +383,12 @@ class AgentBootstrap:
         # (e.g. .claude/) so we catch both commands and skills
         # directories (skills-migrated agents replace the commands
         # directory with a sibling skills directory during init).
+        #
+        # Note: extension command files live under agent_root too, so
+        # they may appear in both agent_files and extension_files.
+        # This is harmless — during teardown the two dicts are merged
+        # by key ({**agent, **ext}), so duplicates are deduplicated
+        # and the hash is identical either way.
         if self.manifest.commands_dir:
             agent_root = self.agent_dir(project_path)
             if agent_root.is_dir():
