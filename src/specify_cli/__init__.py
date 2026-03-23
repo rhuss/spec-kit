@@ -1715,7 +1715,7 @@ def _handle_agent_skills_migration(console: Console, agent_key: str) -> None:
 def init(
     project_name: str = typer.Argument(None, help="Name for your new project directory (optional if using --here, or use '.' for current directory)"),
     ai_assistant: str = typer.Option(None, "--ai", help=AI_ASSISTANT_HELP),
-    agent: str = typer.Option(None, "--agent", help="AI agent to use (enables file tracking for clean teardown when switching agents). Accepts the same agent IDs as --ai."),
+    agent: str = typer.Option(None, "--agent", help="AI agent to use (enables file tracking for clean teardown when switching agents). Accepts the same agent IDs as --ai. Use --ai generic for custom agent directories."),
     ai_commands_dir: str = typer.Option(None, "--ai-commands-dir", help="Directory for agent command files (required with --ai generic, e.g. .myagent/commands/)"),
     script_type: str = typer.Option(None, "--script", help="Script type to use: sh or ps"),
     ignore_agent_tools: bool = typer.Option(False, "--ignore-agent-tools", help="Skip checks for AI agent tools like Claude Code"),
@@ -1784,7 +1784,10 @@ def init(
             console.print("[red]Error:[/red] --agent and --ai cannot both be specified. Use one or the other.")
             raise typer.Exit(1)
         ai_assistant = agent
-        use_agent_pack = True
+        # "generic" uses --ai-commands-dir and has no embedded pack,
+        # so it falls through to the legacy flow.
+        if agent != "generic":
+            use_agent_pack = True
 
     # Detect when option values are likely misinterpreted flags (parameter ordering issue)
     if ai_assistant and ai_assistant.startswith("--"):
@@ -2678,15 +2681,28 @@ def agent_switch(
             old_tracked_agent, old_tracked_ext = get_tracked_files(project_path, current_agent)
             all_files = {**old_tracked_agent, **old_tracked_ext}
 
-            console.print(f"  [dim]Tearing down {current_agent}...[/dim]")
-            current_bootstrap.teardown(
-                project_path,
-                force=True,  # already confirmed above
-                files=all_files if all_files else None,
-            )
-            console.print(f"  [green]✓[/green] {current_agent} removed")
+            if all_files:
+                console.print(f"  [dim]Tearing down {current_agent}...[/dim]")
+                current_bootstrap.teardown(
+                    project_path,
+                    force=True,  # already confirmed above
+                    files=all_files,
+                )
+                console.print(f"  [green]✓[/green] {current_agent} removed")
+            else:
+                # No install manifest (legacy --ai project) — fall back
+                # to removing the agent directory via AGENT_CONFIG.
+                agent_config = AGENT_CONFIG.get(current_agent, {})
+                agent_folder = agent_config.get("folder")
+                if agent_folder:
+                    agent_dir = project_path / agent_folder.rstrip("/")
+                    if agent_dir.is_dir():
+                        shutil.rmtree(agent_dir)
+                        console.print(f"  [green]✓[/green] {current_agent} directory removed (legacy)")
+                else:
+                    console.print(f"  [yellow]Warning:[/yellow] No tracked files or AGENT_CONFIG entry for '{current_agent}' — skipping teardown")
         except AgentPackError:
-            # If pack-based teardown fails, try legacy cleanup via AGENT_CONFIG
+            # If pack-based resolution/load fails, try legacy cleanup via AGENT_CONFIG
             agent_config = AGENT_CONFIG.get(current_agent, {})
             agent_folder = agent_config.get("folder")
             if agent_folder:
@@ -2923,6 +2939,13 @@ def agent_add(
             manifest = AgentManifest.from_yaml(manifest_file)
         except ManifestValidationError as exc:
             console.print(f"[red]Validation failed:[/red] {exc}")
+            raise typer.Exit(1)
+
+        if manifest.id != agent_id:
+            console.print(
+                f"[red]Error:[/red] Manifest ID '{manifest.id}' does not match "
+                f"the specified agent ID '{agent_id}'."
+            )
             raise typer.Exit(1)
 
         dest = _catalog_agents_dir() / manifest.id

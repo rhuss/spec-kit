@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import yaml
-from platformdirs import user_data_path
 
 logger = logging.getLogger(__name__)
 
@@ -212,8 +211,10 @@ class AgentBootstrap:
     def setup(self, project_path: Path, script_type: str, options: Dict[str, Any]) -> List[Path]:
         """Install agent files into *project_path*.
 
-        This is invoked by ``specify init --ai <agent>`` and
-        ``specify agent switch <agent>``.
+        This is invoked by ``specify init --agent <agent>`` and
+        ``specify agent switch <agent>``.  The legacy ``--ai`` flag
+        uses the old non-pack bootstrap flow and does not call this
+        method.
 
         Implementations **must** return every file they create so that the
         CLI can record both agent-installed files and extension-installed
@@ -340,37 +341,20 @@ class AgentBootstrap:
 
         This must be called **after** the full init pipeline has finished
         writing files (commands, context files, extensions) into the
-        project.  It combines the files reported by :meth:`setup` with
-        any extra files (e.g. from extension registration), scans the
-        agent's directory tree for anything additional, and writes the
-        install manifest.
+        project.  It records every file reported by :meth:`setup` plus
+        any extra files (e.g. from extension registration) and scans
+        the agent's directory tree for anything additional.
 
-        ``setup()`` may return *all* files created by the shared
-        scaffolding (including shared project files in ``.specify/``).
-        Only files under the agent's own directory tree are recorded as
-        ``agent_files`` — shared project infrastructure is not tracked
-        per-agent and will not be removed during teardown.
+        All files returned by ``setup()`` are tracked — including shared
+        project infrastructure — so that teardown/switch can precisely
+        remove everything the agent installed.
 
         Args:
             agent_files: Files reported by :meth:`setup`.
             extension_files: Files created by extension registration.
         """
         all_extension = list(extension_files or [])
-
-        # Filter agent_files: only keep files under the agent's directory
-        # tree.  setup() returns *all* scaffolded files (including shared
-        # project infrastructure in .specify/) but only agent-owned files
-        # should be tracked per-agent — shared files are not removed
-        # during teardown/switch.
-        agent_root = self.agent_dir(project_path)
-        agent_root_resolved = agent_root.resolve()
-        all_agent: List[Path] = []
-        for p in (agent_files or []):
-            try:
-                p.resolve().relative_to(agent_root_resolved)
-                all_agent.append(p)
-            except ValueError:
-                pass  # Path is outside the agent root — skip it
+        all_agent: List[Path] = list(agent_files or [])
 
         # Scan the agent's directory tree for files created by later
         # init pipeline steps (skills, presets, extensions) that
@@ -413,7 +397,7 @@ class DefaultBootstrap(AgentBootstrap):
         super().__init__(manifest)
         parts = manifest.commands_dir.split("/") if manifest.commands_dir else []
         self.AGENT_DIR = parts[0] if parts else ""
-        self.COMMANDS_SUBDIR = parts[1] if len(parts) > 1 else ""
+        self.COMMANDS_SUBDIR = "/".join(parts[1:]) if len(parts) > 1 else ""
 
     def setup(self, project_path: Path, script_type: str, options: Dict[str, Any]) -> List[Path]:
         """Install agent files into the project using the standard scaffold."""
@@ -673,7 +657,7 @@ def _embedded_agents_dir() -> Path:
 
 def _user_agents_dir() -> Path:
     """Return the user-level agent overrides directory."""
-    return user_data_path("specify", "github") / "agents"
+    return Path.home() / ".specify" / "agents"
 
 
 def _project_agents_dir(project_path: Path) -> Path:
@@ -683,7 +667,7 @@ def _project_agents_dir(project_path: Path) -> Path:
 
 def _catalog_agents_dir() -> Path:
     """Return the catalog-installed agent cache directory."""
-    return user_data_path("specify", "github") / "agent-cache"
+    return Path.home() / ".specify" / "agent-cache"
 
 
 @dataclass

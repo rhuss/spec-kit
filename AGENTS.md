@@ -440,7 +440,7 @@ specify init my-project --agent claude          # Pack-based flow (with file tra
 specify init --here --agent gemini --ai-skills  # With skills
 ```
 
-`--agent` and `--ai` are mutually exclusive. When `--agent` is used, `init-options.json` gains `"agent_pack": true`.
+`--agent` and `--ai` are mutually exclusive. When `--agent` is used, `init-options.json` gains `"agent_pack": true`. The `generic` agent (which requires `--ai-commands-dir`) falls through to the legacy flow since it has no embedded pack.
 
 ### `specify agent` subcommands
 
