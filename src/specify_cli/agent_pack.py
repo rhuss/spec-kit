@@ -17,6 +17,8 @@ The embedded packs ship inside the pip wheel so that
 import hashlib
 import importlib.util
 import json
+import logging
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +26,29 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 from platformdirs import user_data_path
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Agent ID validation
+# ---------------------------------------------------------------------------
+
+#: Regex that every agent ID must match: lowercase alphanumeric + hyphens.
+_AGENT_ID_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+
+
+def _validate_agent_id(agent_id: str) -> None:
+    """Raise ``PackResolutionError`` when *agent_id* is unsafe or malformed.
+
+    Rejects IDs containing ``/``, ``..``, or characters outside ``[a-z0-9-]``
+    to prevent path-traversal attacks through the resolution stack.
+    """
+    if not agent_id or not _AGENT_ID_RE.match(agent_id):
+        raise PackResolutionError(
+            f"Invalid agent ID {agent_id!r} — "
+            "IDs must match [a-z0-9-] (lowercase alphanumeric and hyphens, "
+            "no leading/trailing hyphens)."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +267,16 @@ class AgentBootstrap:
     # -- helpers available to subclasses ------------------------------------
 
     def agent_dir(self, project_path: Path) -> Path:
-        """Return the agent's top-level directory inside the project."""
+        """Return the agent's top-level directory inside the project.
+
+        Raises ``AgentPackError`` when the manifest's ``commands_dir`` is
+        empty, since the agent directory cannot be determined.
+        """
+        if not self.manifest.commands_dir:
+            raise AgentPackError(
+                f"Agent '{self.manifest.id}' has an empty commands_dir — "
+                "cannot determine agent directory."
+            )
         return project_path / self.manifest.commands_dir.split("/")[0]
 
     def collect_installed_files(self, project_path: Path) -> List[Path]:
@@ -358,6 +392,53 @@ class AgentBootstrap:
             self.manifest.id,
             agent_files=all_agent,
             extension_files=all_extension,
+        )
+
+
+class DefaultBootstrap(AgentBootstrap):
+    """Generic bootstrap that derives its directory layout from the manifest.
+
+    This replaces the need for per-agent ``bootstrap.py`` files when the
+    agent follows the standard setup/teardown pattern — create the
+    commands directory, run the shared scaffold, and delegate teardown to
+    ``remove_tracked_files``.
+
+    The ``AGENT_DIR`` and ``COMMANDS_SUBDIR`` class attributes are
+    computed from the manifest's ``commands_dir`` field (e.g.
+    ``".claude/commands"`` → ``AGENT_DIR=".claude"``,
+    ``COMMANDS_SUBDIR="commands"``).
+    """
+
+    def __init__(self, manifest: AgentManifest):
+        super().__init__(manifest)
+        parts = manifest.commands_dir.split("/") if manifest.commands_dir else []
+        self.AGENT_DIR = parts[0] if parts else ""
+        self.COMMANDS_SUBDIR = parts[1] if len(parts) > 1 else ""
+
+    def setup(self, project_path: Path, script_type: str, options: Dict[str, Any]) -> List[Path]:
+        """Install agent files into the project using the standard scaffold."""
+        if self.AGENT_DIR and self.COMMANDS_SUBDIR:
+            commands_dir = project_path / self.AGENT_DIR / self.COMMANDS_SUBDIR
+            commands_dir.mkdir(parents=True, exist_ok=True)
+        return self._scaffold_project(project_path, script_type)
+
+    def teardown(
+        self,
+        project_path: Path,
+        *,
+        force: bool = False,
+        files: Optional[Dict[str, str]] = None,
+    ) -> List[str]:
+        """Remove agent files from the project.
+
+        Only removes individual tracked files — directories are never
+        deleted.  When *files* is provided, exactly those files are
+        removed.  Otherwise the install manifest is consulted and
+        ``AgentFileModifiedError`` is raised if any tracked file was
+        modified and *force* is ``False``.
+        """
+        return remove_tracked_files(
+            project_path, self.manifest.id, force=force, files=files
         )
 
 
@@ -626,8 +707,11 @@ def resolve_agent_pack(
       3. Catalog-installed cache
       4. Embedded in wheel
 
-    Raises ``PackResolutionError`` when no pack is found at any level.
+    Raises ``PackResolutionError`` when *agent_id* is invalid or when
+    no pack is found at any level.
     """
+    _validate_agent_id(agent_id)
+
     candidates: List[tuple[str, Path]] = []
 
     # Priority 1 — user level
@@ -763,15 +847,23 @@ def list_all_agents(project_path: Optional[Path] = None) -> List[ResolvedPack]:
 def load_bootstrap(pack_path: Path, manifest: AgentManifest) -> AgentBootstrap:
     """Import ``bootstrap.py`` from *pack_path* and return the bootstrap instance.
 
-    The bootstrap module must define exactly one public subclass of
-    ``AgentBootstrap``.  That class is instantiated with *manifest* and
-    returned.
+    When a ``bootstrap.py`` exists, the module must define exactly one
+    public subclass of ``AgentBootstrap``.  When it is absent the
+    :class:`DefaultBootstrap` is used instead — it derives its directory
+    layout from the manifest's ``commands_dir`` field.
+
+    .. warning::
+       **Trust boundary:** ``bootstrap.py`` modules are dynamically
+       imported and can execute arbitrary code.  The 4-level resolution
+       stack (user → project → catalog → embedded) means that *any*
+       pack author whose pack is placed in one of these directories can
+       run code with the privileges of the current process.  Only
+       install packs from trusted sources.
     """
     bootstrap_file = pack_path / BOOTSTRAP_FILENAME
     if not bootstrap_file.is_file():
-        raise AgentPackError(
-            f"Bootstrap module not found: {bootstrap_file}"
-        )
+        # No bootstrap module — use the generic DefaultBootstrap
+        return DefaultBootstrap(manifest)
 
     spec = importlib.util.spec_from_file_location(
         f"speckit_agent_{manifest.id}_bootstrap", bootstrap_file
@@ -790,6 +882,7 @@ def load_bootstrap(pack_path: Path, manifest: AgentManifest) -> AgentBootstrap:
             isinstance(obj, type)
             and issubclass(obj, AgentBootstrap)
             and obj is not AgentBootstrap
+            and obj is not DefaultBootstrap
             and not name.startswith("_")
         )
     ]
@@ -824,7 +917,7 @@ def validate_pack(pack_path: Path) -> List[str]:
 
     bootstrap_file = pack_path / BOOTSTRAP_FILENAME
     if not bootstrap_file.is_file():
-        warnings.append(f"Missing {BOOTSTRAP_FILENAME} (pack cannot be bootstrapped)")
+        warnings.append(f"Missing {BOOTSTRAP_FILENAME} (DefaultBootstrap will be used)")
 
     if not manifest.commands_dir:
         warnings.append("command_registration.commands_dir not set in manifest")

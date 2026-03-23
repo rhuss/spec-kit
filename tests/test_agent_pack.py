@@ -255,10 +255,12 @@ class TestBootstrapContract:
         b = load_bootstrap(tmp_path, m)
         assert isinstance(b, AgentBootstrap)
 
-    def test_load_bootstrap_missing_file(self, tmp_path):
+    def test_load_bootstrap_missing_file_uses_default(self, tmp_path):
+        """When bootstrap.py is absent, DefaultBootstrap is returned."""
+        from specify_cli.agent_pack import DefaultBootstrap
         m = AgentManifest.from_dict(_minimal_manifest_dict())
-        with pytest.raises(AgentPackError, match="Bootstrap module not found"):
-            load_bootstrap(tmp_path, m)
+        b = load_bootstrap(tmp_path, m)
+        assert isinstance(b, DefaultBootstrap)
 
     def test_bootstrap_setup_and_teardown(self, tmp_path):
         """Verify a loaded bootstrap can set up and tear down via file tracking."""
@@ -313,6 +315,37 @@ class TestBootstrapContract:
         m = AgentManifest.from_yaml(pack_dir / MANIFEST_FILENAME)
         with pytest.raises(AgentPackError, match="No AgentBootstrap subclass"):
             load_bootstrap(pack_dir, m)
+
+
+class TestDefaultBootstrap:
+    """Verify the DefaultBootstrap class works for all embedded packs."""
+
+    def test_default_bootstrap_derives_dirs_from_manifest(self):
+        from specify_cli.agent_pack import DefaultBootstrap
+        data = _minimal_manifest_dict()
+        m = AgentManifest.from_dict(data)
+        b = DefaultBootstrap(m)
+        assert b.AGENT_DIR == ".test-agent"
+        assert b.COMMANDS_SUBDIR == "commands"
+
+    def test_default_bootstrap_empty_commands_dir(self):
+        from specify_cli.agent_pack import DefaultBootstrap
+        data = _minimal_manifest_dict()
+        data["command_registration"]["commands_dir"] = ""
+        m = AgentManifest.from_dict(data)
+        b = DefaultBootstrap(m)
+        assert b.AGENT_DIR == ""
+        assert b.COMMANDS_SUBDIR == ""
+
+    def test_agent_dir_raises_on_empty_commands_dir(self, tmp_path):
+        """agent_dir() raises AgentPackError when commands_dir is empty."""
+        from specify_cli.agent_pack import DefaultBootstrap
+        data = _minimal_manifest_dict()
+        data["command_registration"]["commands_dir"] = ""
+        m = AgentManifest.from_dict(data)
+        b = DefaultBootstrap(m)
+        with pytest.raises(AgentPackError, match="empty commands_dir"):
+            b.agent_dir(tmp_path)
 
 
 # ===================================================================
@@ -381,6 +414,43 @@ class TestResolutionOrder:
         resolved = resolve_agent_pack("claude")
         assert resolved.source == "catalog"
         assert resolved.manifest.version == "2.0.0"
+
+
+class TestAgentIdValidation:
+    """Verify that resolve_agent_pack rejects malicious/invalid IDs."""
+
+    @pytest.mark.parametrize("bad_id", [
+        "../etc/passwd",
+        "foo/bar",
+        "agent..evil",
+        "UPPERCASE",
+        "has space",
+        "has_underscore",
+        "",
+        "-leading-hyphen",
+        "trailing-hyphen-",
+        "agent@evil",
+    ])
+    def test_invalid_ids_rejected(self, bad_id):
+        with pytest.raises(PackResolutionError, match="Invalid agent ID"):
+            resolve_agent_pack(bad_id)
+
+    @pytest.mark.parametrize("good_id", [
+        "claude",
+        "cursor-agent",
+        "kiro-cli",
+        "a",
+        "a1",
+        "my-agent-2",
+    ])
+    def test_valid_ids_accepted(self, good_id):
+        """Valid IDs pass validation (they may not resolve, but don't fail validation)."""
+        try:
+            resolve_agent_pack(good_id)
+        except PackResolutionError as exc:
+            # May fail because agent doesn't exist, but NOT because of
+            # invalid ID.
+            assert "Invalid agent ID" not in str(exc)
 
 
 # ===================================================================
@@ -466,7 +536,8 @@ class TestExportPack:
         dest = tmp_path / "export"
         result = export_pack("claude", dest)
         assert (result / MANIFEST_FILENAME).is_file()
-        assert (result / BOOTSTRAP_FILENAME).is_file()
+        # bootstrap.py is optional — DefaultBootstrap handles
+        # agents without one.
 
 
 # ===================================================================

@@ -2438,15 +2438,24 @@ app.add_typer(agent_app, name="agent")
 
 @agent_app.command("list")
 def agent_list(
-    installed: bool = typer.Option(False, "--installed", help="Only show agents with local presence in the current project"),
+    installed: bool = typer.Option(False, "--installed", help="Only show agents that have files present in the current project"),
 ):
     """List available agent packs."""
-    from .agent_pack import list_all_agents, list_embedded_agents
+    from .agent_pack import list_all_agents, list_embedded_agents, _manifest_path
 
     show_banner()
 
     project_path = Path.cwd()
-    agents = list_all_agents(project_path=project_path if installed else None)
+    agents = list_all_agents(project_path=project_path)
+
+    if installed:
+        # Filter to only agents that have an install manifest in the
+        # current project, i.e. agents whose files are actually present.
+        agents = [
+            a for a in agents
+            if _manifest_path(project_path, a.manifest.id).is_file()
+        ]
+
     if not agents and not installed:
         agents_from_embedded = list_embedded_agents()
         if not agents_from_embedded:
@@ -2454,7 +2463,13 @@ def agent_list(
             console.print("[dim]Agent packs are embedded in the specify-cli wheel.[/dim]")
             raise typer.Exit(0)
 
-    table = Table(title="Available Agent Packs", show_lines=False)
+    if not agents and installed:
+        console.print("[yellow]No agents are installed in the current project.[/yellow]")
+        console.print("[dim]Use 'specify init --agent <id>' or 'specify agent switch <id>' to install one.[/dim]")
+        raise typer.Exit(0)
+
+    title = "Installed Agents" if installed else "Available Agent Packs"
+    table = Table(title=title, show_lines=False)
     table.add_column("ID", style="cyan", no_wrap=True)
     table.add_column("Name", style="white")
     table.add_column("Version", style="dim")
@@ -2470,7 +2485,7 @@ def agent_list(
         table.add_row(m.id, m.name, m.version, source_display, cli_marker)
 
     console.print(table)
-    console.print(f"\n[dim]{len(agents)} agent(s) available[/dim]")
+    console.print(f"\n[dim]{len(agents)} agent(s) {'installed' if installed else 'available'}[/dim]")
 
 
 @agent_app.command("info")
@@ -2638,6 +2653,11 @@ def agent_switch(
 
     console.print(f"[bold]Switching agent: {current_agent or '(none)'} → {agent_id}[/bold]")
 
+    # Snapshot tracked files before teardown so we can attempt rollback
+    # if the new agent's setup fails after teardown.
+    old_tracked_agent: dict[str, str] = {}
+    old_tracked_ext: dict[str, str] = {}
+
     # Teardown current agent (best effort — may have been set up with old system)
     if current_agent:
         try:
@@ -2655,8 +2675,8 @@ def agent_switch(
                     raise typer.Exit(0)
 
             # Retrieve tracked file lists and feed them into teardown
-            agent_files, extension_files = get_tracked_files(project_path, current_agent)
-            all_files = {**agent_files, **extension_files}
+            old_tracked_agent, old_tracked_ext = get_tracked_files(project_path, current_agent)
+            all_files = {**old_tracked_agent, **old_tracked_ext}
 
             console.print(f"  [dim]Tearing down {current_agent}...[/dim]")
             current_bootstrap.teardown(
@@ -2675,18 +2695,52 @@ def agent_switch(
                     shutil.rmtree(agent_dir)
                     console.print(f"  [green]✓[/green] {current_agent} directory removed (legacy)")
 
-    # Setup new agent
+    # Setup new agent — with rollback on failure
     try:
         new_bootstrap = load_bootstrap(resolved.path, resolved.manifest)
         console.print(f"  [dim]Setting up {agent_id}...[/dim]")
         agent_files = new_bootstrap.setup(project_path, script_type, options)
         console.print(f"  [green]✓[/green] {agent_id} installed")
-    except AgentPackError as exc:
+    except (AgentPackError, Exception) as exc:
         console.print(f"[red]Error setting up {agent_id}:[/red] {exc}")
+
+        # Attempt to restore the old agent so the project is not left
+        # in a broken state after teardown succeeded but setup failed.
+        if current_agent:
+            console.print(f"[yellow]Attempting to restore previous agent ({current_agent})...[/yellow]")
+            try:
+                rollback_resolved = resolve_agent_pack(current_agent, project_path=project_path)
+                rollback_bs = load_bootstrap(rollback_resolved.path, rollback_resolved.manifest)
+                rollback_files = rollback_bs.setup(project_path, script_type, options)
+                rollback_bs.finalize_setup(
+                    project_path,
+                    agent_files=rollback_files,
+                    extension_files=list(
+                        (project_path / p).resolve()
+                        for p in old_tracked_ext
+                        if (project_path / p).is_file()
+                    ),
+                )
+                console.print(f"  [green]✓[/green] {current_agent} restored")
+            except Exception:
+                # Rollback also failed — mark error state in init-options
+                console.print(
+                    f"[red]Rollback failed.[/red] "
+                    f"The project may be in a broken state — "
+                    f"run 'specify init --here --agent {current_agent}' to repair."
+                )
+                options["agent_switch_error"] = (
+                    f"Switch to '{agent_id}' failed after teardown of "
+                    f"'{current_agent}'. Restore manually."
+                )
+                init_options_file.write_text(
+                    json.dumps(options, indent=2), encoding="utf-8"
+                )
         raise typer.Exit(1)
 
     # Update init options
     options["ai"] = agent_id
+    options.pop("agent_switch_error", None)  # clear any previous error
     init_options_file.write_text(json.dumps(options, indent=2), encoding="utf-8")
 
     # Re-register extension commands for the new agent
@@ -2761,7 +2815,12 @@ def _reregister_extension_commands(project_path: Path, agent_id: str) -> List[Pa
                 )
                 if registered:
                     reregistered += len(registered)
-        except Exception:
+        except Exception as exc:
+            import logging as _logging
+            _logging.getLogger(__name__).debug(
+                "Failed to re-register extension '%s' for agent '%s': %s",
+                ext_id, agent_id, exc,
+            )
             continue
 
     # Collect files created by extension registration
@@ -2879,6 +2938,7 @@ def agent_add(
 @agent_app.command("remove")
 def agent_remove(
     agent_id: str = typer.Argument(..., help="Agent pack ID to remove"),
+    force: bool = typer.Option(False, "--force", help="Skip confirmation prompts"),
 ):
     """Remove a cached/override agent pack.
 
@@ -2896,12 +2956,23 @@ def agent_remove(
 
     removed = False
 
-    # Check user-level
+    # Check user-level — prompt because this affects all projects globally
     user_pack = _user_agents_dir() / agent_id
     if user_pack.is_dir():
-        shutil.rmtree(user_pack)
-        console.print(f"[green]✓[/green] Removed user-level override for '{agent_id}'")
-        removed = True
+        if not force:
+            console.print(
+                f"[yellow]User-level override for '{agent_id}' affects all projects globally.[/yellow]"
+            )
+            if not typer.confirm("Remove this user-level override?"):
+                console.print("[dim]Skipped user-level override removal.[/dim]")
+            else:
+                shutil.rmtree(user_pack)
+                console.print(f"[green]✓[/green] Removed user-level override for '{agent_id}'")
+                removed = True
+        else:
+            shutil.rmtree(user_pack)
+            console.print(f"[green]✓[/green] Removed user-level override for '{agent_id}'")
+            removed = True
 
     # Check project-level
     project_pack = Path.cwd() / ".specify" / "agents" / agent_id

@@ -427,4 +427,54 @@ When adding new agents:
 
 ---
 
+## Agent Pack System (new)
+
+The agent pack system is a declarative, self-contained replacement for the legacy `AGENT_CONFIG` + case/switch architecture. Each agent is defined by a `speckit-agent.yml` manifest and an optional `bootstrap.py` module. When `bootstrap.py` is absent, the built-in `DefaultBootstrap` class derives its directory layout from the manifest's `commands_dir` field.
+
+### `--agent` flag on `specify init`
+
+`specify init --agent <id>` uses the pack-based init flow instead of the legacy `--ai` flow. Both accept the same agent IDs, but `--agent` additionally enables installed-file tracking so that `specify agent switch` can cleanly tear down agent files later.
+
+```bash
+specify init my-project --agent claude          # Pack-based flow (with file tracking)
+specify init --here --agent gemini --ai-skills  # With skills
+```
+
+`--agent` and `--ai` are mutually exclusive. When `--agent` is used, `init-options.json` gains `"agent_pack": true`.
+
+### `specify agent` subcommands
+
+| Command                         | Description |
+| ------------------------------- | ----------- |
+| `specify agent list`            | List all available agent packs |
+| `specify agent list --installed`| List only agents installed in the current project |
+| `specify agent info <id>`       | Show detailed information about an agent pack |
+| `specify agent switch <id>`     | Switch the active agent (tears down old, sets up new) |
+| `specify agent search [query]`  | Search agents by name, ID, description, or tags |
+| `specify agent validate <path>` | Validate an agent pack directory |
+| `specify agent export <id>`     | Export an agent pack for editing |
+| `specify agent add <id>`        | Install an agent pack from a local path |
+| `specify agent remove <id>`     | Remove a cached/override agent pack |
+
+### Pack resolution order
+
+Agent packs resolve by priority (highest first):
+1. **User-level** (`~/.specify/agents/<id>/`) — applies to all projects
+2. **Project-level** (`.specify/agents/<id>/`) — project-specific override
+3. **Catalog cache** (downloaded via `specify agent add`)
+4. **Embedded** (bundled in the specify-cli wheel)
+
+### Trust boundary
+
+Agent packs can include a `bootstrap.py` module that is dynamically imported and executed. Pack authors can run arbitrary code through this mechanism. Only install packs from trusted sources. The 4-level resolution stack means that placing a pack in any of the resolution directories causes its code to run when the agent is loaded.
+
+### Installed-file tracking
+
+When using `--agent`, all installed files are recorded in `.specify/agent-manifest-<id>.json` with SHA-256 hashes. During `specify agent switch`, the CLI:
+1. Checks for user-modified files before teardown
+2. Prompts for confirmation if files were changed
+3. Feeds tracked file lists into teardown for precise, file-level removal (directories are never deleted)
+
+---
+
 *This documentation should be updated whenever new agents are added to maintain accuracy and completeness.*
