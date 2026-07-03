@@ -90,13 +90,28 @@ if [ -z "$FEATURE_DESCRIPTION" ]; then
     exit 1
 fi
 
-# Function to get highest number from specs directory
+# Function to get highest number from specs directory.
+# Scans all active git worktrees to avoid number collisions when
+# parallel features are developed in separate worktrees.
 get_highest_from_specs() {
     local specs_dir="$1"
+    local specs_name
+    specs_name=$(basename "$specs_dir")
     local highest=0
-    
-    if [ -d "$specs_dir" ]; then
-        for dir in "$specs_dir"/*; do
+
+    local worktree_roots=""
+    if command -v git >/dev/null 2>&1 && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        worktree_roots=$(git worktree list --porcelain 2>/dev/null | grep '^worktree ' | sed 's/^worktree //')
+    fi
+
+    if [ -z "$worktree_roots" ]; then
+        worktree_roots="."
+    fi
+
+    for wt_root in $worktree_roots; do
+        local wt_specs="$wt_root/$specs_name"
+        [ -d "$wt_specs" ] || continue
+        for dir in "$wt_specs"/*; do
             [ -d "$dir" ] || continue
             dirname=$(basename "$dir")
             # Match sequential prefixes (>=3 digits), but skip timestamp dirs.
@@ -108,8 +123,8 @@ get_highest_from_specs() {
                 fi
             fi
         done
-    fi
-    
+    done
+
     echo "$highest"
 }
 
